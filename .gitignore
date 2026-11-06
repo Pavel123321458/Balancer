@@ -1,0 +1,15 @@
+.organizer/
+.env
+.venv/
+__pycache__/
+*.pyc
+
+node_modules/
+data/
+uploads/
+storage/
+*.zip
+*.log
+.pytest_cache/
+.env.*
+!.env.example

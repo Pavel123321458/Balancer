@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!requirements.txt
+!backend/
+!backend/**
+!worker/
+!worker/**
+!procedures/
+!procedures/**
+**/__pycache__

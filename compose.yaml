@@ -1,0 +1,41 @@
+name: balancer
+x-app: &app
+  build: .
+  environment:
+    MYSQL_HOST: db
+    MYSQL_DATABASE: balancer
+    MYSQL_USER: balancer
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+    BALANCER_PLUGINS: /plugins
+  depends_on:
+    db:
+      condition: service_healthy
+  volumes:
+    - ${PLUGINS_DIR:-./plugins}:/plugins:ro
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: balancer
+      MYSQL_USER: balancer
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+    volumes:
+      - mysql:/var/lib/mysql
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysql --protocol=TCP -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" \"$$MYSQL_DATABASE\" -e 'SELECT 1 FROM runs LIMIT 1' >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+  api:
+    <<: *app
+    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:${BALANCER_PORT:-8000}:8000"
+  worker:
+    <<: *app
+    command: ["python", "-m", "worker.main"]
+    restart: unless-stopped
+volumes:
+  mysql:
