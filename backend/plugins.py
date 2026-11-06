@@ -4,9 +4,9 @@ import os
 from pathlib import Path
 import re
 
-from procedures import compare, normalize
+from procedures import aggregate, compare, normalize
 
-BUILTINS = {"normalize": normalize, "compare": compare}
+BUILTINS = {"normalize": normalize, "compare": compare, "aggregate": aggregate}
 
 
 def plugin_dir():
@@ -24,7 +24,24 @@ def plugin_file(name):
 
 
 def available_checks():
-    return sorted(path.stem for path in plugin_dir().glob("check_*.py") if path.is_file())
+    return available("check")
+
+
+def available(role):
+    names = []
+    for path in plugin_dir().glob(f"{role}_*.py"):
+        try:
+            plugin_file(path.stem)
+        except ValueError:
+            continue
+        names.append(path.stem)
+    return sorted(names)
+
+
+def source_path(name, role):
+    if name == "builtin" and role in BUILTINS:
+        return Path(BUILTINS[role].__file__)
+    return plugin_file(name)
 
 
 def load(name, role):

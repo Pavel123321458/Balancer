@@ -5,12 +5,14 @@ from zipfile import BadZipFile, ZipFile
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
+from backend.analytics import fact_filters, router as analytics_router
 from backend.datasets import MAX_UPLOAD, entries, read_response
 from backend.db import connection, dump, many, session, transaction
 from backend.mart import Mart
-from backend.plugins import available_checks, plugin_file
+from backend.plugins import available, available_checks, plugin_file, source_path
 
 app = FastAPI(title="Balancer")
+app.include_router(analytics_router)
 Limit = Annotated[int, Query(ge=1, le=1000)]
 Offset = Annotated[int, Query(ge=0)]
 Change = Literal["SAME", "VALUE_CHANGED", "ATTRIBUTE_NEW", "ATTRIBUTE_LOST"]
@@ -20,8 +22,10 @@ class RunRequest(BaseModel):
     dataset_id: int = Field(gt=0)
     normalizer: str = "builtin"
     comparator: str = "builtin"
+    aggregator: str = "builtin"
     normalize_params: dict[str, Any] = Field(default_factory=dict)
     compare_params: dict[str, Any] = Field(default_factory=dict)
+    aggregate_params: dict[str, Any] = Field(default_factory=dict)
     checks: dict[str, dict[str, Any]] | None = None
 
 
@@ -51,7 +55,7 @@ def create_run(request: RunRequest):
     if settings["checks"] is None:
         settings["checks"] = {name: {} for name in available_checks()}
     try:
-        for name in (request.normalizer, request.comparator):
+        for name in (request.normalizer, request.comparator, request.aggregator):
             if name != "builtin":
                 plugin_file(name)
         for name in settings["checks"]:
@@ -73,7 +77,7 @@ def create_run(request: RunRequest):
 
 def run_row(cursor, run_id):
     cursor.execute(
-        "SELECT r.*, d.application_count AS total FROM runs r JOIN datasets d ON d.id = r.dataset_id "
+        "SELECT r.*, d.name AS dataset_name, d.application_count AS total FROM runs r JOIN datasets d ON d.id = r.dataset_id "
         "WHERE r.id = %s", (run_id,),
     )
     row = cursor.fetchone()
@@ -108,15 +112,63 @@ def start_run(run_id: int):
 def progress(run_id: int):
     with session() as cursor:
         row = run_row(cursor, run_id)
+        cursor.execute("SELECT settings FROM configurations WHERE id = %s", (row["configuration_id"],))
+        row["settings"] = json.loads(cursor.fetchone()["settings"])
         cursor.execute("SELECT * FROM run_summaries WHERE run_id = %s", (run_id,))
         row["summary"] = cursor.fetchone() if row["status"] == "SUCCEEDED" else None
         return row
 
 
+@app.get("/datasets")
+def list_datasets():
+    with session() as cursor:
+        cursor.execute("SELECT id, name, application_count, created_at FROM datasets ORDER BY id DESC")
+        return cursor.fetchall()
+
+
+@app.get("/runs")
+def list_runs(limit: Limit = 30, offset: Offset = 0):
+    with session() as cursor:
+        cursor.execute(
+            """SELECT r.id, r.status, r.stage, r.processed, r.created_at, d.name AS dataset_name,
+                      d.application_count AS total, s.apps_with_differences, s.apps_with_decision_change
+               FROM runs r JOIN datasets d ON d.id = r.dataset_id
+               LEFT JOIN run_summaries s ON s.run_id = r.id
+               ORDER BY r.id DESC LIMIT %s OFFSET %s""", (limit + 1, offset),
+        )
+        rows = cursor.fetchall()
+    return {"rows": rows[:limit], "has_more": len(rows) > limit}
+
+
+@app.get("/plugins")
+def plugins():
+    return {
+        **{role: ["builtin", *available(role)] for role in ("normalize", "compare", "aggregate")},
+        "checks": available_checks(),
+    }
+
+
+@app.get("/runs/{run_id}/code/{role}/{name}")
+def plugin_code(run_id: int, role: Literal["normalize", "compare", "aggregate", "check"], name: str):
+    with session() as cursor:
+        run = run_row(cursor, run_id)
+        cursor.execute("SELECT settings FROM configurations WHERE id = %s", (run["configuration_id"],))
+        settings = json.loads(cursor.fetchone()["settings"])
+    field = {"normalize": "normalizer", "compare": "comparator", "aggregate": "aggregator"}
+    names = settings["checks"] if role == "check" else [settings.get(field[role], "builtin")]
+    if name not in names:
+        raise HTTPException(404, "Процедура отсутствует в конфигурации")
+    try:
+        path = source_path(name, role)
+        return {"filename": path.name, "source": path.read_text(encoding="utf-8-sig")}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(404, "Файл процедуры недоступен") from exc
+
+
 @app.get("/runs/{run_id}/results")
 def results(run_id: int, app_id: str | None = None, path: str | None = None,
             array_key: str | None = None, change_type: Change | None = None,
-            only_differences: bool = False, limit: Limit = 100, offset: Offset = 0):
+            only_differences: bool = False, limit: Limit = 100, offset: Offset = 0, facts: str = "{}"):
     with session() as cursor:
         require_completed(cursor, run_id)
         filters = {name: value for name, value in (
@@ -124,6 +176,9 @@ def results(run_id: int, app_id: str | None = None, path: str | None = None,
         ) if value is not None}
         if only_differences:
             filters["diff_flag"] = 1
+        selected = fact_filters(facts)
+        if selected:
+            filters["fact_filters"] = selected
         rows = Mart(cursor, run_id).page(limit, offset, **filters)
         return {"offset": offset, "rows": rows}
 

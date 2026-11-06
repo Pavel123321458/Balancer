@@ -1,5 +1,7 @@
 import json
 
+from backend.analytics import matching_attributes
+
 COLUMNS = (
     "APP_ID", "PREFIX", "CLASS", "SUFFIX", "ARRAY_KEY", "KEY", "PATH",
     "VALUE_BEFORE", "VALUE_AFTER", "ADJUSTED_BEFORE", "ADJUSTED_AFTER",
@@ -21,6 +23,11 @@ class Mart:
     def _query(self, select, filters, tail="", extra=()):
         conditions, params = ["run_id = %s"], [self.run_id]
         for name, value in filters.items():
+            if name == "fact_filters":
+                conditions.append(matching_attributes(value, "comparisons") +
+                                  " AND n.PATH = comparisons.PATH AND n.ARRAY_KEY = comparisons.ARRAY_KEY)")
+                params.extend(value.values())
+                continue
             if name == "path_prefix":
                 escaped = value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
                 conditions.append("PATH LIKE %s ESCAPE '!'")

@@ -33,9 +33,21 @@ services:
     command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "127.0.0.1:${BALANCER_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/docs', timeout=2).close()"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
   worker:
     <<: *app
     command: ["python", "-m", "worker.main"]
     restart: unless-stopped
+  frontend:
+    build: ./frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${BALANCER_WEB_PORT:-5173}:80"
 volumes:
   mysql:

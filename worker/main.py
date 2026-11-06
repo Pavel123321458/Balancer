@@ -60,7 +60,8 @@ def store_batch(conn, run_id, batch, normalizer, comparator, settings):
         cursor.execute("UPDATE runs SET processed = processed + %s WHERE id = %s", (len(batch), run_id))
 
 
-def finish(conn, run_id, checks):
+def finish(conn, run_id, settings):
+    checks = settings["checks"]
     with transaction(conn) as cursor:
         stage(cursor, run_id, "checks", f"Checks: {', '.join(checks) or 'none'}")
 
@@ -72,20 +73,13 @@ def finish(conn, run_id, checks):
             params = {**check["params"], **overrides}
             report.extend((run_id, check["id"], dump(row)) for row in check["entrypoint"](mart, params))
 
+    name = settings.get("aggregator", "builtin")
     with transaction(conn) as cursor:
-        stage(cursor, run_id, "aggregating", "Building counts and application summary")
+        stage(cursor, run_id, "aggregating", f"Агрегация и итоговые счётчики: {name}")
+    aggregator = load(name, "aggregate")
     with transaction(conn) as cursor:
         many(cursor, "check_results", ("run_id", "check_id", "result"), report)
-        cursor.execute(
-            """INSERT INTO pivot_facts
-                (run_id, PREFIX, CLASS, SUFFIX, ARRAY_KEY, `KEY`, VALUE_ADJUSTED, DIFF_FLAG, SOURCE, CNT)
-               SELECT n.run_id, n.PREFIX, n.CLASS, n.SUFFIX, n.ARRAY_KEY, n.`KEY`,
-                      n.ADJUSTED_VALUE, c.DIFF_FLAG, n.SOURCE, COUNT(DISTINCT n.APP_ID)
-               FROM normalized n JOIN comparisons c USING (run_id, APP_ID, PATH, ARRAY_KEY)
-               WHERE n.run_id = %s
-               GROUP BY n.run_id, n.PREFIX, n.CLASS, n.SUFFIX, n.ARRAY_KEY, n.`KEY`,
-                        n.ADJUSTED_VALUE, c.DIFF_FLAG, n.SOURCE""", (run_id,),
-        )
+        aggregator.aggregate(cursor, run_id, settings.get("aggregate_params", {}))
         cursor.execute(
             """INSERT INTO run_summaries
                SELECT %s, COUNT(*), COALESCE(SUM(DIFF_FLAG), 0), COALESCE(SUM(DECISION_CHANGED), 0),
@@ -120,7 +114,7 @@ def process(conn, run_id):
             break
         store_batch(conn, run_id, batch, normalizer, comparator, settings)
         last_id = batch[-1]["app_id"]
-    finish(conn, run_id, settings["checks"])
+    finish(conn, run_id, settings)
 
 
 def consume(conn):

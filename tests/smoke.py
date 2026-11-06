@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import time
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
 
@@ -55,6 +56,16 @@ def verify(archive, base_url):
     checks = api(path + "/checks?limit=1000")
     assert api(path + "/facts?limit=1")
     assert api(path + "/logs")[-1]["stage"] == "done"
+    for scope, total in (("differences", summary["apps_with_differences"]),
+                         ("decisions", summary["apps_with_decision_change"])):
+        assert api(path + f"/applications?scope={scope}")["total"] == total
+    pivot = api(path + "/pivot?group=CLASS&group=KEY&split=SOURCE&limit=1")["rows"][0]
+    source = "AFTER" if pivot["AFTER"] else "BEFORE"
+    filters = json.dumps({"CLASS": pivot["CLASS"], "KEY": pivot["KEY"], "SOURCE": source})
+    apps = api(path + "/applications?" + urlencode({"filters": filters, "limit": 1}))
+    assert 0 < apps["total"] <= pivot[source]
+    app_id = apps["rows"][0]["APP_ID"]
+    assert api(path + "/results?" + urlencode({"app_id": app_id, "facts": filters, "limit": 1}))["rows"]
     print(json.dumps({
         **summary, "elapsed_seconds": round(elapsed, 2), "check_rows": len(checks),
         "checks": sorted({row["check_id"] for row in checks}),
